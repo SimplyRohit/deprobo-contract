@@ -1,17 +1,13 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
 
-declare_id!("JAVuBXeBZqXNtS73azhBDAoYaaAFfo4gWXoZe2e7Jf8H");
+declare_id!("49ofcTbAdsnMfqUtJcNsECwkNUDgf6he1pdLdot5GQLQ"); 
 
 #[program]
 pub mod prediction_market {
     use super::*;
-
-    pub fn create_market(ctx: Context<CreateMarket>, question: String, close_time: i64) -> Result<()> {
+    pub fn create_market(ctx: Context<CreateMarket>, question: String) -> Result<()> {
         let market = &mut ctx.accounts.market;
-        let clock = Clock::get()?;
-        require!(close_time > clock.unix_timestamp, ErrorCode::InvalidCloseTime);
-        require!(question.len() >= 20 && question.len() <= 400, ErrorCode::InvalidQuestionLength);
         market.authority = *ctx.accounts.creator.key;
         market.question = question;
         market.yes_pool = ctx.accounts.yes_pool.key();
@@ -19,21 +15,11 @@ pub mod prediction_market {
         market.total_yes = 0;
         market.total_no = 0;
         market.resolved = false;
-        market.winning_outcome = false;
-        market.created_at = clock.unix_timestamp;
-        market.close_time = close_time;
-        msg!("Instruction: CreateMarket");
-        msg!("Market: {:?}", market.key());
-        msg!("Question: {}", market.question);
-        msg!("Close Time: {}", market.close_time);
         Ok(())
     }
 
     pub fn place_bet(ctx: Context<PlaceBet>, amount: u64, outcome: bool) -> Result<()> {
         let market = &mut ctx.accounts.market;
-        let clock = Clock::get()?;
-        require!(clock.unix_timestamp <= market.close_time, ErrorCode::BettingClosed);
-        require!(!market.resolved, ErrorCode::AlreadyResolved);
         let user = &ctx.accounts.user;
         if outcome {
             let cpi = CpiContext::new(ctx.accounts.system_program.to_account_info(), system_program::Transfer {
@@ -41,14 +27,14 @@ pub mod prediction_market {
                 to: ctx.accounts.yes_pool.to_account_info(),
             });
             system_program::transfer(cpi, amount)?;
-            market.total_yes = market.total_yes.checked_add(amount).ok_or(ErrorCode::Overflow)?;
+            market.total_yes = market.total_yes.checked_add(amount).unwrap();
         } else {
             let cpi = CpiContext::new(ctx.accounts.system_program.to_account_info(), system_program::Transfer {
                 from: user.to_account_info(),
                 to: ctx.accounts.no_pool.to_account_info(),
             });
             system_program::transfer(cpi, amount)?;
-            market.total_no = market.total_no.checked_add(amount).ok_or(ErrorCode::Overflow)?;
+            market.total_no = market.total_no.checked_add(amount).unwrap();
         }
         let bet = &mut ctx.accounts.bet;
         bet.user = *user.key;
@@ -56,26 +42,15 @@ pub mod prediction_market {
         bet.amount = amount;
         bet.outcome = outcome;
         bet.claimed = false;
-        msg!("Instruction: PlaceBet");
-        msg!("Market: {:?}", market.key());
-        msg!("User: {:?}", bet.user);
-        msg!("Outcome: {:?}", outcome);
-        msg!("Amount: {:?}", amount);
         Ok(())
     }
-
     pub fn resolve_market(ctx: Context<ResolveMarket>, outcome: bool) -> Result<()> {
         let market = &mut ctx.accounts.market;
         require!(!market.resolved, ErrorCode::AlreadyResolved);
-        require!(market.authority == *ctx.accounts.authority.key, ErrorCode::Unauthorized);
         market.resolved = true;
         market.winning_outcome = outcome;
-        msg!("Instruction: ResolveMarket");
-        msg!("Market: {:?}", market.key());
-        msg!("Outcome: {:?}", outcome);
         Ok(())
     }
-
     pub fn claim_winnings(ctx: Context<ClaimWinnings>) -> Result<()> {
         let market = &ctx.accounts.market;
         let bet = &mut ctx.accounts.bet;
@@ -89,20 +64,12 @@ pub mod prediction_market {
             (&ctx.accounts.no_pool, &ctx.accounts.yes_pool, market.total_no)
         };
         let loser_balance = **loser_pool.to_account_info().lamports.borrow();
-        let share = loser_balance
-            .checked_mul(bet.amount)
-            .ok_or(ErrorCode::Overflow)?
-            .checked_div(total_winner_bets)
-            .ok_or(ErrorCode::Overflow)?;
-        let payout = bet.amount.checked_add(share).ok_or(ErrorCode::Overflow)?;
+        let share = loser_balance.checked_mul(bet.amount).unwrap().checked_div(total_winner_bets).unwrap();
+        let payout = bet.amount.checked_add(share).unwrap();
         **winner_pool.to_account_info().try_borrow_mut_lamports()? -= bet.amount;
         **loser_pool.to_account_info().try_borrow_mut_lamports()? -= share;
         **user.to_account_info().try_borrow_mut_lamports()? += payout;
         bet.claimed = true;
-        msg!("Instruction: ClaimWinnings");
-        msg!("Market: {:?}", market.key());
-        msg!("User: {:?}", bet.user);
-        msg!("Payout: {:?}", payout);
         Ok(())
     }
 }
@@ -154,7 +121,6 @@ pub struct ResolveMarket<'info> {
     pub market: Account<'info, Market>,
     pub authority: Signer<'info>,
 }
-
 #[derive(Accounts)]
 pub struct ClaimWinnings<'info> {
     #[account(mut)]
@@ -180,17 +146,12 @@ pub struct Market {
     pub total_no: u64,
     pub resolved: bool,
     pub winning_outcome: bool,
-    pub created_at: i64,
-    pub close_time: i64,
 }
-
 impl Market {
-    pub const MAX_SIZE: usize = 32 + 4 + 400 + 32 + 32 + 8 + 8 + 1 + 1 + 8 + 8;
+    pub const MAX_SIZE: usize = 32 + 4 + 200 + 32 + 32 + 8 + 8 + 1 + 1;
 }
-
 #[account]
-pub struct PoolAccount {}
-
+pub struct PoolAccount {} // Just to hold lamports
 #[account]
 pub struct BetAccount {
     pub user: Pubkey,
@@ -199,7 +160,6 @@ pub struct BetAccount {
     pub outcome: bool,
     pub claimed: bool,
 }
-
 impl BetAccount {
     pub const SIZE: usize = 32 + 32 + 8 + 1 + 1;
 }
@@ -214,15 +174,4 @@ pub enum ErrorCode {
     AlreadyClaimed,
     #[msg("Bet outcome is not the winner")]
     WrongBet,
-    #[msg("Betting for this market is closed")]
-    BettingClosed,
-    #[msg("Invalid close time")]
-    InvalidCloseTime,
-    #[msg("Overflow error")]
-    Overflow,
-    #[msg("Unauthorized resolver")]
-    Unauthorized,
-    #[msg("Question length must be between 20 and 400 characters")]
-    InvalidQuestionLength,
-
 }
