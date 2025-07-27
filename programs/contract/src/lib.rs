@@ -1,10 +1,11 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
-
-declare_id!("38STDbUx5mRR9uHF7xDPsQrMwedLASWLt1j6ejTQKFxn");
+declare_id!("EZL6TMygqqTWCY27nhKA9NqwrarGMF877oWoX3qxBAK");
 
 #[program]
 pub mod prediction_market {
+    use anchor_lang::solana_program;
+
     use super::*;
 
     pub fn create_market(
@@ -25,6 +26,7 @@ pub mod prediction_market {
         market.resolved = false;
         market.bet = true;
         market.winning_outcome = false;
+        market.fee_collected = 0;
 
         emit!(MarketCreated {
             market: market.key(),
@@ -49,6 +51,11 @@ pub mod prediction_market {
             market.bet = false;
             return err!(ErrorCode::BettingClosed);
         }
+
+        require!(
+            amount >= 1 && amount <= 10 * solana_program::native_token::LAMPORTS_PER_SOL,
+            ErrorCode::BetAmountInvalid
+        );
 
         let transfer_target = if outcome {
             ctx.accounts.yes_pool.to_account_info()
@@ -95,9 +102,31 @@ pub mod prediction_market {
         market.resolved = true;
         market.winning_outcome = outcome;
 
+        market.bet = false;
+
+        let loser_pool = if outcome {
+            &ctx.accounts.no_pool
+        } else {
+            &ctx.accounts.yes_pool
+        };
+
+        let authority = &ctx.accounts.authority;
+
+        let loser_balance = **loser_pool.to_account_info().lamports.borrow();
+        let fee = loser_balance
+            .checked_mul(20)
+            .unwrap()
+            .checked_div(100)
+            .unwrap();
+
+        **loser_pool.to_account_info().try_borrow_mut_lamports()? -= fee;
+        **authority.to_account_info().try_borrow_mut_lamports()? += fee;
+        market.fee_collected = fee;
+
         emit!(MarketResolved {
             market: market.key(),
             winning_outcome: outcome,
+            fee,
         });
 
         Ok(())
@@ -112,10 +141,20 @@ pub mod prediction_market {
         require!(!bet.claimed, ErrorCode::AlreadyClaimed);
         require!(bet.outcome == market.winning_outcome, ErrorCode::WrongBet);
 
+        require!(bet.market == market.key(), ErrorCode::MarketMismatch);
+
         let (winner_pool, loser_pool, total_winner_bets) = if market.winning_outcome {
-            (&ctx.accounts.yes_pool, &ctx.accounts.no_pool, market.total_yes)
+            (
+                &ctx.accounts.yes_pool,
+                &ctx.accounts.no_pool,
+                market.total_yes,
+            )
         } else {
-            (&ctx.accounts.no_pool, &ctx.accounts.yes_pool, market.total_no)
+            (
+                &ctx.accounts.no_pool,
+                &ctx.accounts.yes_pool,
+                market.total_no,
+            )
         };
 
         let loser_balance = **loser_pool.to_account_info().lamports.borrow();
@@ -206,6 +245,14 @@ pub struct PlaceBet<'info> {
 pub struct ResolveMarket<'info> {
     #[account(mut, has_one = authority)]
     pub market: Account<'info, Market>,
+
+    #[account(mut, address = market.yes_pool)]
+    pub yes_pool: Account<'info, PoolAccount>,
+
+    #[account(mut, address = market.no_pool)]
+    pub no_pool: Account<'info, PoolAccount>,
+
+    #[account(mut)]
     pub authority: Signer<'info>,
 }
 
@@ -240,10 +287,11 @@ pub struct Market {
     pub total_no: u64,
     pub resolved: bool,
     pub winning_outcome: bool,
+    pub fee_collected: u64,
 }
 
 impl Market {
-    pub const SIZE: usize = 32 + 1 + 8 + 8 + 32 + 32 + 8 + 8 + 1 + 1;
+    pub const SIZE: usize = 32 + 1 + 8 + 8 + 32 + 32 + 8 + 8 + 1 + 1 + 8;
 }
 
 #[account]
@@ -284,6 +332,7 @@ pub struct BetPlaced {
 pub struct MarketResolved {
     pub market: Pubkey,
     pub winning_outcome: bool,
+    pub fee: u64,
 }
 
 #[event]
@@ -309,4 +358,10 @@ pub enum ErrorCode {
 
     #[msg("Betting is closed for this market.")]
     BettingClosed,
+
+    #[msg("Bet amount is invalid")]
+    BetAmountInvalid,
+
+    #[msg("Market mismatch for this bet")]
+    MarketMismatch,
 }
